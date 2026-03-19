@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto-Loading Landscape Viewer</title>
+    <style>
+        :root {
+            --overlay-bg: rgba(0, 0, 0, 0.6);
+            --text-color: #f1f1f1;
+            --primary-font: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+            overflow: hidden;
+            font-family: var(--primary-font);
+        }
+
+        /* Image Viewer */
+        #viewer-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #active-image {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* Ensures landscape fills screen beautifully */
+            opacity: 0;
+            transition: opacity 0.5s ease-in-out;
+        }
+
+        #active-image.loaded {
+            opacity: 1;
+        }
+
+        /* UI Overlays */
+        #info-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: var(--overlay-bg);
+            color: var(--text-color);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 1rem;
+            backdrop-filter: blur(5px);
+            z-index: 10;
+            display: none;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        #webcam-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 160px;
+            height: 120px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            z-index: 10;
+            background: #111;
+        }
+
+        #webcam-preview {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror the webcam for natural feel */
+        }
+
+        /* Loading & Toast States */
+        #spinner {
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            z-index: 20;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        #toast {
+            position: absolute;
+            bottom: -50px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #ff4757;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            transition: bottom 0.3s ease;
+            z-index: 30;
+        }
+
+        #toast.show {
+            bottom: 20px;
+        }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="viewer-container">
+        <div id="spinner"></div>
+        <img id="active-image" alt="Landscape Photo Viewer" />
+        
+        <div id="info-overlay">
+            <strong id="ui-source">Source</strong> | <span id="ui-topic">Topic</span><br>
+            <small>Image <span id="ui-index">0</span> of <span id="ui-total">0</span></small>
+        </div>
+
+        <div id="webcam-container">
+            <video id="webcam-preview" autoplay playsinline></video>
+        </div>
+
+        <div id="toast">Camera failed. Keyboard arrows enabled.</div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. HARDCODED SEARCH CONFIGURATION
+        // ==========================================
+        const SEARCH_CONFIG = [
+            { site: 'unsplash', prompt: 'forest landscape' },
+            { site: 'pexels', prompt: 'city skyline' },
+            { site: 'unsplash', prompt: 'ocean sunset' },
+            { site: 'pexels', prompt: 'mountain range' }
+        ];
+
+        // ==========================================
+        // 2. STATE MANAGEMENT
+        // ==========================================
+        let playlist = [];
+        let currentIndex = 0;
+        
+        // Gesture logic state
+        let handPosXHistory = [];
+        let lastGestureTime = 0;
+        const GESTURE_DEBOUNCE_MS = 1500;
+        const GESTURE_THRESHOLD = 0.12; // Lower = more sensitive
+
+        // UI Elements
+        const imgElement = document.getElementById('active-image');
+        const spinner = document.getElementById('spinner');
+        const infoOverlay = document.getElementById('info-overlay');
+        const videoElement = document.getElementById('webcam-preview');
+
+        // ==========================================
+        // 3. IMAGE FETCHING LOGIC
+        // ==========================================
+        async function fetchImages() {
+            spinner.style.display = 'block';
+            
+            // Loop through config and generate 3 images per prompt
+            for (const config of SEARCH_CONFIG) {
+                for (let i = 1; i <= 3; i++) {
+                    // Using a CORS-friendly public API that accepts prompts.
+                    // (Real JSON Unsplash/Pexels APIs require auth keys)
+                    // The 'lock' query param forces distinct images.
+                    const cleanPrompt = encodeURIComponent(config.prompt);
+                    const randomId = Math.floor(Math.random() * 10000);
+                    const url = `https://loremflickr.com/1920/1080/${cleanPrompt}?lock=${randomId}`;
+                    
+                    playlist.push({
+                        url: url,
+                        site: config.site,
+                        prompt: config.prompt
+                    });
+                }
+            }
+
+            if (playlist.length > 0) {
+                showImage(0);
+            } else {
+                showToast("No images found.", false);
+                spinner.style.display = 'none';
+            }
+        }
+
+        // ==========================================
+        // 4. DISPLAY LOGIC
+        // ==========================================
+        function showImage(index) {
+            // Boundary checks
+            if (index < 0) currentIndex = playlist.length - 1;
+            else if (index >= playlist.length) currentIndex = 0;
+            else currentIndex = index;
+
+            const imgData = playlist[currentIndex];
+            
+            imgElement.classList.remove('loaded');
+            spinner.style.display = 'block';
+
+            // Preload to avoid tearing
+            const tempImg = new Image();
+            tempImg.onload = () => {
+                imgElement.src = imgData.url;
+                imgElement.classList.add('loaded');
+                spinner.style.display = 'none';
+                
+                // Update UI Overlay
+                document.getElementById('ui-source').innerText = imgData.site.toUpperCase();
+                document.getElementById('ui-topic').innerText = imgData.prompt;
+                document.getElementById('ui-index').innerText = currentIndex + 1;
+                document.getElementById('ui-total').innerText = playlist.length;
+                infoOverlay.style.display = 'block';
+            };
+            tempImg.onerror = () => {
+                // Skip broken images
+                nextImage();
+            }
+            tempImg.src = imgData.url;
+        }
+
+        function nextImage() { showImage(currentIndex + 1); }
+        function prevImage() { showImage(currentIndex - 1); }
+
+        // ==========================================
+        // 5. GESTURE CONTROL (MediaPipe Hands)
+        // ==========================================
+        function initGestureControl() {
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.6,
+                minTrackingConfidence: 0.6
+            });
+
+            hands.onResults(onHandResults);
+
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({ image: videoElement });
+                },
+                width: 320,
+                height: 240
+            });
+
+            camera.start()
+                .then(() => console.log("Camera started successfully"))
+                .catch(err => {
+                    console.error("Camera access denied or failed", err);
+                    showToast("Camera access failed. Keyboard arrows enabled.");
+                    document.getElementById('webcam-container').style.display = 'none';
+                });
+        }
+
+        function onHandResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                // Track the wrist (landmark 0) X-coordinate
+                const wrist = results.multiHandLandmarks[0][0];
+                handPosXHistory.push(wrist.x);
+
+                // Keep a short history buffer (approx 10-15 frames)
+                if (handPosXHistory.length > 10) {
+                    handPosXHistory.shift();
+                }
+
+                if (handPosXHistory.length === 10) {
+                    const startX = handPosXHistory[0];
+                    const endX = handPosXHistory[9];
+                    const deltaX = endX - startX;
+
+                    const now = Date.now();
+                    if (now - lastGestureTime > GESTURE_DEBOUNCE_MS) {
+                        // Note: Video is mirrored visually, but coordinates are raw.
+                        // Moving hand physically Right -> X increases.
+                        if (deltaX > GESTURE_THRESHOLD) {
+                            console.log("Gesture: Waved Right -> Next Image");
+                            nextImage();
+                            lastGestureTime = now;
+                            handPosXHistory = [];
+                        } 
+                        // Moving hand physically Left -> X decreases.
+                        else if (deltaX < -GESTURE_THRESHOLD) {
+                            console.log("Gesture: Waved Left -> Previous Image");
+                            prevImage();
+                            lastGestureTime = now;
+                            handPosXHistory = [];
+                        }
+                    }
+                }
+            } else {
+                // Clear history if hand leaves frame to prevent ghost swipes
+                handPosXHistory = [];
+            }
+        }
+
+        // ==========================================
+        // 6. UTILITIES & EVENT LISTENERS
+        // ==========================================
+        function showToast(message, hideAfter = true) {
+            const toast = document.getElementById('toast');
+            toast.innerText = message;
+            toast.classList.add('show');
+            if(hideAfter) {
+                setTimeout(() => toast.classList.remove('show'), 5000);
+            }
+        }
+
+        // Keyboard Fallback
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowRight') nextImage();
+            else if (e.key === 'ArrowLeft') prevImage();
+        });
+
+        // Initialize App
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchImages();
+            initGestureControl();
+        });
+
+    </script>
+</body>
+</html>
